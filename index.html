@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Caderno Digital - Resolva suas fichas</title>
+<style>
+  :root {
+    --bg: #f4f6f8;
+    --toolbar: #2c3e50;
+    --accent: #3498db;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    height: 100vh;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    background: var(--toolbar);
+    color: white;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+  .tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  button, input[type="range"], input[type="color"] {
+    background: #34495e;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 8px;
+    cursor: pointer;
+    font-size: 0.8rem;
+  }
+  button.active { background: var(--accent); }
+  input[type="color"] { width: 32px; height: 28px; padding: 1px; }
+  input[type="range"] { width: 70px; }
+  .main {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+  .sidebar {
+    width: 180px;
+    background: white;
+    border-right: 1px solid #ddd;
+    padding: 10px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: 0.85rem;
+  }
+  .canvas-container {
+    flex: 1;
+    position: relative;
+    overflow: auto;
+    background: #e0e0e0;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 10px;
+  }
+  #wrapper {
+    position: relative;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.12);
+    background: white;
+  }
+  canvas { display: block; touch-action: none; }
+  #pdf-canvas, #draw-canvas { position: absolute; top: 0; left: 0; }
+  .page-controls { display: flex; gap: 4px; align-items: center; }
+  .status { font-size: 0.75rem; color: #666; margin-top: auto; }
+  @media (max-width: 700px) {
+    .main { flex-direction: column; }
+    .sidebar {
+      width: 100%;
+      flex-direction: row;
+      flex-wrap: wrap;
+      border-right: none;
+      border-bottom: 1px solid #ddd;
+      padding: 8px;
+    }
+    .canvas-container { padding: 5px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Caderno Digital</h1>
+  <div class="tools">
+    <button id="btnPen" class="active">Caneta</button>
+    <button id="btnEraser">Borracha</button>
+    <input type="color" id="colorPicker" value="#1a1a1a">
+    <label>Tam. <input type="range" id="sizeSlider" min="1" max="16" value="3"></label>
+    <button id="btnUndo">Desfazer</button>
+    <button id="btnClear">Limpar</button>
+    <button id="btnExport">Exportar</button>
+  </div>
+</header>
+
+<div class="main">
+  <aside class="sidebar">
+    <strong>PDF</strong>
+    <input type="file" id="pdfUpload" accept="application/pdf">
+    <button id="btnLoadDefault">Carregar ficha</button>
+    <div class="page-controls">
+      <button id="btnPrev">◀</button>
+      <span id="pageInfo">1 / 1</span>
+      <button id="btnNext">▶</button>
+    </div>
+    <div class="status" id="status">Pronto — escreva com o dedo ou caneta</div>
+  </aside>
+
+  <div class="canvas-container">
+    <div id="wrapper">
+      <canvas id="pdf-canvas"></canvas>
+      <canvas id="draw-canvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as pdfjsLib from 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs';
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+
+const pdfCanvas = document.getElementById('pdf-canvas');
+const drawCanvas = document.getElementById('draw-canvas');
+const ctxPdf = pdfCanvas.getContext('2d');
+const ctxDraw = drawCanvas.getContext('2d');
+const wrapper = document.getElementById('wrapper');
+
+let pdfDoc = null;
+let currentPage = 1;
+let totalPages = 1;
+let scale = 1.4;
+
+let isDrawing = false;
+let currentTool = 'pen';
+let currentColor = '#1a1a1a';
+let currentSize = 3;
+let history = [];
+let historyStep = -1;
+
+const statusEl = document.getElementById('status');
+function setStatus(msg) { statusEl.textContent = msg; }
+
+async function loadPDF(source) {
+  setStatus('Carregando PDF...');
+  try {
+    const loadingTask = pdfjsLib.getDocument(source);
+    pdfDoc = await loadingTask.promise;
+    totalPages = pdfDoc.numPages;
+    currentPage = 1;
+    await renderPage(currentPage);
+    setStatus(`PDF carregado — ${totalPages} página(s)`);
+  } catch (err) {
+    console.error(err);
+    setStatus('Erro ao carregar PDF. Tente outro arquivo.');
+  }
+}
+
+async function renderPage(num) {
+  if (!pdfDoc) return;
+  const page = await pdfDoc.getPage(num);
+  const viewport = page.getViewport({ scale });
+  
+  pdfCanvas.width = viewport.width;
+  pdfCanvas.height = viewport.height;
+  drawCanvas.width = viewport.width;
+  drawCanvas.height = viewport.height;
+  wrapper.style.width = viewport.width + 'px';
+  wrapper.style.height = viewport.height + 'px';
+
+  await page.render({ canvasContext: ctxPdf, viewport }).promise;
+
+  ctxDraw.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  history = [];
+  historyStep = -1;
+  saveState();
+
+  document.getElementById('pageInfo').textContent = `${num} / ${totalPages}`;
+  setStatus(`Página ${num} de ${totalPages}`);
+}
+
+function saveState() {
+  historyStep++;
+  if (historyStep < history.length) history.length = historyStep;
+  history.push(drawCanvas.toDataURL());
+}
+
+function undo() {
+  if (historyStep > 0) {
+    historyStep--;
+    const img = new Image();
+    img.onload = () => {
+      ctxDraw.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      ctxDraw.drawImage(img, 0, 0);
+    };
+    img.src = history[historyStep];
+  }
+}
+
+function getPos(e) {
+  const rect = drawCanvas.getBoundingClientRect();
+  const scaleX = drawCanvas.width / rect.width;
+  const scaleY = drawCanvas.height / rect.height;
+  const clientX = e.clientX ?? e.touches?.[0]?.clientX;
+  const clientY = e.clientY ?? e.touches?.[0]?.clientY;
+  return {
+    x: (clientX - rect.left) * scaleX,
+    y: (clientY - rect.top) * scaleY
+  };
+}
+
+function startDraw(e) {
+  e.preventDefault();
+  isDrawing = true;
+  const pos = getPos(e);
+  ctxDraw.beginPath();
+  ctxDraw.moveTo(pos.x, pos.y);
+  if (currentTool === 'pen') {
+    ctxDraw.strokeStyle = currentColor;
+    ctxDraw.lineWidth = currentSize;
+    ctxDraw.lineCap = 'round';
+    ctxDraw.lineJoin = 'round';
+    ctxDraw.globalCompositeOperation = 'source-over';
+  } else {
+    ctxDraw.globalCompositeOperation = 'destination-out';
+    ctxDraw.lineWidth = currentSize * 4;
+  }
+}
+
+function draw(e) {
+  if (!isDrawing) return;
+  e.preventDefault();
+  const pos = getPos(e);
+  ctxDraw.lineTo(pos.x, pos.y);
+  ctxDraw.stroke();
+}
+
+function endDraw(e) {
+  if (!isDrawing) return;
+  if (e) e.preventDefault();
+  isDrawing = false;
+  ctxDraw.globalCompositeOperation = 'source-over';
+  saveState();
+}
+
+// Mouse
+drawCanvas.addEventListener('mousedown', startDraw);
+drawCanvas.addEventListener('mousemove', draw);
+drawCanvas.addEventListener('mouseup', endDraw);
+drawCanvas.addEventListener('mouseleave', endDraw);
+
+// Touch (celular / tablet)
+drawCanvas.addEventListener('touchstart', startDraw, { passive: false });
+drawCanvas.addEventListener('touchmove', draw, { passive: false });
+drawCanvas.addEventListener('touchend', endDraw, { passive: false });
+drawCanvas.addEventListener('touchcancel', endDraw, { passive: false });
+
+// Tools
+document.getElementById('btnPen').onclick = () => {
+  currentTool = 'pen';
+  document.getElementById('btnPen').classList.add('active');
+  document.getElementById('btnEraser').classList.remove('active');
+};
+document.getElementById('btnEraser').onclick = () => {
+  currentTool = 'eraser';
+  document.getElementById('btnEraser').classList.add('active');
+  document.getElementById('btnPen').classList.remove('active');
+};
+document.getElementById('colorPicker').oninput = e => currentColor = e.target.value;
+document.getElementById('sizeSlider').oninput = e => currentSize = +e.target.value;
+document.getElementById('btnUndo').onclick = undo;
+document.getElementById('btnClear').onclick = () => {
+  if (confirm('Limpar toda a escrita desta página?')) {
+    ctxDraw.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+    saveState();
+  }
+};
+
+document.getElementById('btnPrev').onclick = () => {
+  if (currentPage > 1) { currentPage--; renderPage(currentPage); }
+};
+document.getElementById('btnNext').onclick = () => {
+  if (currentPage < totalPages) { currentPage++; renderPage(currentPage); }
+};
+
+document.getElementById('pdfUpload').onchange = e => {
+  const file = e.target.files[0];
+  if (file) loadPDF(URL.createObjectURL(file));
+};
+
+document.getElementById('btnLoadDefault').onclick = () => {
+  loadPDF('ficha.pdf').catch(() => setStatus('ficha.pdf não encontrada — faça upload de um PDF'));
+};
+
+document.getElementById('btnExport').onclick = () => {
+  const exportCanvas = document.createElement('canvas');
+  exportCanvas.width = pdfCanvas.width;
+  exportCanvas.height = pdfCanvas.height;
+  const ectx = exportCanvas.getContext('2d');
+  ectx.drawImage(pdfCanvas, 0, 0);
+  ectx.drawImage(drawCanvas, 0, 0);
+  
+  const link = document.createElement('a');
+  link.download = `ficha_resolvida_pagina_${currentPage}.png`;
+  link.href = exportCanvas.toDataURL('image/png');
+  link.click();
+  setStatus('Página exportada como PNG');
+};
+
+// Try to load default if available
+loadPDF('ficha.pdf').catch(() => setStatus('Pronto — carregue um PDF'));
+</script>
+</body>
+</html>
